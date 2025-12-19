@@ -66,16 +66,44 @@ export class SearchService {
       }));
     }
 
+    // 4) Respuesta en lenguaje natural (sin leer contenido; usa metadata + reasons)
+    const files = results.map((r) => ({
+      id: r.id,
+      title: r.title,
+      link: r.link,
+      score: r.score,
+      reason: r.reason
+    }));
+
+    let answer = "";
+    if (files.length > 0) {
+      answer = await this.vertex.answerWithFiles({
+        userQuery: query,
+        files: files.slice(0, 10) // no mandes demasiados
+      });
+    }
+
+    if (!answer) {
+      answer =
+        files.length === 0
+          ? "No encontré documentos relacionados en tu carpeta. Prueba con otra frase o revisa permisos/estructura de carpetas."
+          : `Encontré ${files.length} archivo(s) relacionados. Revisa la lista y dime cuál quieres abrir o si deseas refinar la búsqueda.`;
+    }
+
     return {
+      status: "ok",
+      total: files.length,
       query,
-      intent: plan.intent,
-      expandedTerms: plan.expandedTerms ?? [],
+      answer,
+      files,
+      // si quieres conservar diagnóstico interno:
       meta: {
+        intent: plan.intent,
+        expandedTerms: plan.expandedTerms ?? [],
         usedQueries: usedQueries.length,
         candidates: candidates.length,
         reranked: shouldRerank
-      },
-      results
+      }
     };
   }
 }
