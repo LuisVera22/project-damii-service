@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import { errorMiddleware } from "./middleware/error.middleware.js";
 import { createSearchRoutes } from "./routes/search.routes.js";
+import { createDriveRoutes } from "./routes/drive.routes.js";
 
 export function createApp({ searchRoutes, driveRoutes }) {
   const app = express();
