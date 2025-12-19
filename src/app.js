@@ -3,7 +3,7 @@ import cors from "cors";
 import { errorMiddleware } from "./middleware/error.middleware.js";
 import { createSearchRoutes } from "./routes/search.routes.js";
 
-export function createApp({ searchRoutes }) {
+export function createApp({ searchRoutes, driveRoutes }) {
   const app = express();
 
   app.use(cors());
@@ -12,6 +12,7 @@ export function createApp({ searchRoutes }) {
   app.get("/health", (req, res) => res.json({ ok: true }));
 
   app.use("/api", searchRoutes);
+  app.use("/api", driveRoutes);
 
   app.use(errorMiddleware);
 

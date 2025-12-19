@@ -28,4 +28,39 @@ export class DriveClient {
       modifiedTime: f.modifiedTime
     }));
   }
+
+  // LISTADO DE ARCHIVOS EN CARPETA
+  async listFolder({ folderId, pageToken, pageSize = 50 }) {
+    const q = [
+      `'${folderId}' in parents`,
+      "trashed=false",
+    ].join(" and ");
+
+    const res = await this.drive.files.list({
+      q,
+      pageSize,
+      pageToken: pageToken || undefined,
+      // Orden: primero carpetas, luego nombre
+      orderBy: "folder,name",
+      // Campos que necesitamos
+      fields:
+        "nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,parents,webViewLink,iconLink)",
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    });
+
+    return {
+      files: (res.data.files ?? []).map((f) => ({
+        id: f.id,
+        nombre: f.name,
+        tipo: f.mimeType,
+        creado: f.createdTime,
+        modificado: f.modifiedTime,
+        carpetaPadre: folderId,
+        vistaWeb: f.webViewLink,
+        icono: f.iconLink,
+      })),
+      nextPageToken: res.data.nextPageToken ?? null,
+    };
+  }
 }
