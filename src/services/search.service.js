@@ -35,7 +35,6 @@ export class SearchService {
       const docs = await this.drive.searchInFolder({
         folderId: driveFolderId,
         driveExpr: dq.driveExpr,
-        mimeTypes: plan.mimeTypes,
         pageSize: pageSizePerQuery
       });
 

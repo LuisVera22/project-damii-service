@@ -9,8 +9,8 @@ export class DriveClient {
     this.drive = google.drive({ version: "v3", auth });
   }
 
-  async searchInFolder({ folderId, driveExpr, mimeTypes, pageSize }) {
-    const q = buildDriveQ({ folderId, driveExpr, mimeTypes });
+  async searchInFolder({ folderId, driveExpr, pageSize }) {
+    const q = buildDriveQ({ folderId, driveExpr });
 
     const res = await this.drive.files.list({
       q,
