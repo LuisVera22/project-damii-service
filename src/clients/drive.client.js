@@ -4,7 +4,7 @@ import { buildDriveQ } from "../utils/driveQuery.js";
 export class DriveClient {
   constructor() {
     const auth = new google.auth.GoogleAuth({
-      scopes: ["https://www.googleapis.com/auth/drive.readonly"]
+      scopes: ["https://www.googleapis.com/auth/drive.readonly"],
     });
     this.drive = google.drive({ version: "v3", auth });
   }
@@ -17,7 +17,7 @@ export class DriveClient {
       pageSize,
       fields: "files(id,name,mimeType,webViewLink,modifiedTime)",
       supportsAllDrives: true,
-      includeItemsFromAllDrives: true
+      includeItemsFromAllDrives: true,
     });
 
     return (res.data.files ?? []).map((f) => ({
@@ -25,16 +25,13 @@ export class DriveClient {
       name: f.name,
       mimeType: f.mimeType,
       webViewLink: f.webViewLink,
-      modifiedTime: f.modifiedTime
+      modifiedTime: f.modifiedTime,
     }));
   }
 
   // LISTADO DE ARCHIVOS EN CARPETA
   async listFolder({ folderId, pageToken, pageSize = 50 }) {
-    const q = [
-      `'${folderId}' in parents`,
-      "trashed=false",
-    ].join(" and ");
+    const q = [`'${folderId}' in parents`, "trashed=false"].join(" and ");
 
     const res = await this.drive.files.list({
       q,
@@ -62,5 +59,21 @@ export class DriveClient {
       })),
       nextPageToken: res.data.nextPageToken ?? null,
     };
+  }
+
+  // LISTADO DE ARCHIVOS RECIENTES
+  async listRecentInFolder({ folderId, pageSize = 10 }) {
+    const q = [`'${folderId}' in parents`, "trashed=false"].join(" and ");
+
+    const res = await this.drive.files.list({
+      q,
+      pageSize,
+      orderBy: "modifiedTime desc",
+      fields: "files(id,name,mimeType,modifiedTime,webViewLink,iconLink)",
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    });
+
+    return res.data.files ?? [];
   }
 }
