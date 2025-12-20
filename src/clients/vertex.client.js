@@ -8,7 +8,7 @@ export class VertexClient {
     this.model = this.vertexAI.getGenerativeModel({ model });
   }
 
-  async buildPlan({ userQuery, maxDriveQueries, defaultTopK }) {
+  async buildPlan({ userQuery, defaultTopK }) {
     const prompt = `
       Eres un planificador para buscar en Google Drive dentro de UNA carpeta.
 
@@ -29,26 +29,23 @@ export class VertexClient {
       REGLAS:
       - Si el usuario pide “últimos/recientes/nuevos/cargados”, usa mode="recent" y sort="modifiedTime". driveQuery debe ser null.
       - Si el usuario pide “listar/mostrar archivos”, usa mode="list" y sort="modifiedTime". driveQuery debe ser null.
-      - Si el usuario pide un tema, usa mode="search" y driveQuery usando sintaxis Drive:
+      - Si el usuario pide un tema, usa mode="search" y driveQuery con sintaxis Drive:
         ejemplo: (name contains 'kotlin' or fullText contains 'kotlin') and (name contains 'android' or fullText contains 'android')
       - NO incluyas folderId, ni trashed=false.
-      - NO uses operadores desconocidos.
       - No inventes información.
+      - Devuelve SOLO JSON.
 
       Usuario: ${userQuery}
-    `.trim();
+      `.trim();
 
     const resp = await this.model.generateContent({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
     });
 
     const text =
-      resp?.response?.candidates?.[0]?.content?.parts
-        ?.map((p) => p.text)
-        .join("") ?? "";
+      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ?? "";
     const json = extractJson(text);
 
-    // parse + validate + hardening
     let plan;
     try {
       plan = JSON.parse(json);
@@ -58,26 +55,20 @@ export class VertexClient {
 
     const parsed = SearchPlanSchema.safeParse(plan);
     if (!parsed.success) {
-      // fallback robusto: detecta "recent" por heurística mínima y sino search
       return this.fallbackPlanSimple(userQuery, defaultTopK);
     }
 
     const p = parsed.data;
 
-    // hardening numérico
     const topK = Math.max(1, Math.min(p.topK ?? defaultTopK, 20));
     const candidatesK = Math.max(10, Math.min(p.candidatesK ?? 40, 100));
 
-    // hardening string
     const mode = p.mode ?? "search";
     const sort = p.sort ?? (mode === "search" ? "relevance" : "modifiedTime");
 
-    // En recent/list no debería haber driveQuery
     const driveQuery =
-      mode === "search"
-        ? p.driveQuery && String(p.driveQuery).trim()
-          ? String(p.driveQuery)
-          : null
+      mode === "search" && p.driveQuery && String(p.driveQuery).trim()
+        ? String(p.driveQuery)
         : null;
 
     return {
@@ -116,12 +107,10 @@ export class VertexClient {
         topK: defaultTopK,
         candidatesK: 40,
         shouldRerank: false,
-        explain:
-          "Fallback: intención de archivos recientes detectada por keywords.",
+        explain: "Fallback: intención de archivos recientes detectada por keywords.",
       };
     }
 
-    // fallback search básico
     const tok = safeToken(userQuery);
     return {
       mode: "search",
@@ -136,26 +125,32 @@ export class VertexClient {
     };
   }
 
-  fallbackPlan(tok, defaultTopK, maxDriveQueries) {
-    return {
-      intent: "unknown",
-      expandedTerms: [],
-      queries: [
-        {
-          kind: "baseline",
-          driveExpr: `name contains '${tok}' or fullText contains '${tok}'`,
-        },
-      ].slice(0, maxDriveQueries),
-      mimeTypes: [
-        "application/pdf",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-      ],
-      preferRecentYears: 3,
-      candidatesK: 40,
-      topK: defaultTopK,
-      shouldRerank: true,
-    };
+  async answerWithFiles({ userQuery, files }) {
+    const prompt = `
+    Eres un asistente de biblioteca.
+    Con base en la consulta del usuario y una lista de archivos encontrados, responde en 2–4 oraciones.
+    No inventes contenido de los documentos. Solo usa títulos y reasons.
+
+    Devuelve SOLO JSON válido:
+    {"answer":"..."}
+
+    Usuario: ${userQuery}
+    Archivos: ${JSON.stringify(files)}
+    `.trim();
+
+    const resp = await this.model.generateContent({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+    });
+
+    const text =
+      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ?? "";
+    const json = extractJson(text);
+
+    try {
+      return JSON.parse(json)?.answer ?? "";
+    } catch {
+      return "";
+    }
   }
 
   async rerank({ userQuery, candidates, topK }) {
@@ -168,23 +163,19 @@ export class VertexClient {
     }));
 
     const prompt = `
-        Ordena los siguientes documentos según qué tan bien responden a la intención del usuario.
-        Devuelve SOLO JSON válido (sin texto extra, sin markdown).
+    Ordena los siguientes documentos según qué tan bien responden a la intención del usuario.
+    Devuelve SOLO JSON válido (sin texto extra, sin markdown).
 
-        REGLAS:
-        - No inventes IDs. Usa solo IDs presentes en input.
-        - Devuelve máximo ${topK} resultados.
-        - reason debe ser una frase corta (<= 20 palabras).
+    REGLAS:
+    - No inventes IDs. Usa solo IDs presentes en input.
+    - Devuelve máximo ${topK} resultados.
+    - reason debe ser una frase corta (<= 20 palabras).
 
-        Usuario: ${userQuery}
-        Documentos: ${JSON.stringify(items)}
+    Usuario: ${userQuery}
+    Documentos: ${JSON.stringify(items)}
 
-        Esquema:
-        {
-            "ranked": [
-                {"id":"...","score":0.0,"reason":"..."}
-            ]
-        }
+    Esquema:
+    {"ranked":[{"id":"...","score":0.0,"reason":"..."}]}
     `.trim();
 
     const resp = await this.model.generateContent({
@@ -192,9 +183,7 @@ export class VertexClient {
     });
 
     const text =
-      resp?.response?.candidates?.[0]?.content?.parts
-        ?.map((p) => p.text)
-        .join("") ?? "";
+      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ?? "";
     const json = extractJson(text);
 
     let ranked = [];
@@ -221,7 +210,6 @@ export class VertexClient {
       if (out.length >= topK) break;
     }
 
-    // completar si faltan
     if (out.length < topK) {
       const used = new Set(out.map((x) => x.id));
       for (const d of candidates) {

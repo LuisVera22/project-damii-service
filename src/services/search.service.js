@@ -9,11 +9,7 @@ export class SearchService {
   }
 
   async search({ query, topK }) {
-    const {
-      driveFolderId,
-      rerankTopN,
-      defaultTopK
-    } = this.env;
+    const { driveFolderId, rerankTopN, defaultTopK } = this.env;
 
     if (!driveFolderId) {
       throw new HttpError(500, "DRIVE_FOLDER_ID no configurado");
@@ -22,7 +18,7 @@ export class SearchService {
     // 1) IA → planner simple
     const plan = await this.vertex.buildPlan({
       userQuery: query,
-      defaultTopK
+      defaultTopK,
     });
 
     const finalTopK = Math.max(1, Math.min(topK ?? plan.topK ?? defaultTopK, 20));
@@ -31,15 +27,15 @@ export class SearchService {
     if (plan.mode === "recent") {
       const docs = await this.drive.listRecentInFolder({
         folderId: driveFolderId,
-        pageSize: finalTopK
+        pageSize: finalTopK,
       });
 
-      const files = docs.map((d) => ({
+      const files = (docs ?? []).map((d) => ({
         id: d.id,
         title: d.name,
         link: d.webViewLink,
         score: 0,
-        reason: "Archivo reciente (ordenado por fecha de modificación)."
+        reason: "Archivo reciente (ordenado por fecha de modificación).",
       }));
 
       const answer = files.length
@@ -52,7 +48,7 @@ export class SearchService {
         query,
         answer,
         files,
-        meta: { mode: "recent", explain: plan.explain }
+        meta: { mode: "recent", explain: plan.explain ?? "" },
       };
     }
 
@@ -61,15 +57,18 @@ export class SearchService {
       const resp = await this.drive.listFolder({
         folderId: driveFolderId,
         pageSize: finalTopK,
-        pageToken: null
+        pageToken: null,
       });
 
-      const files = (resp.files ?? resp).map((d) => ({
+      // tu listFolder devuelve {files:[{nombre,vistaWeb,...}], nextPageToken}
+      const items = resp?.files ?? [];
+
+      const files = items.map((d) => ({
         id: d.id,
-        title: d.name ?? d.nombre,
-        link: d.webViewLink ?? d.vistaWeb,
+        title: d.nombre ?? d.name ?? "Sin título",
+        link: d.vistaWeb ?? d.webViewLink ?? null,
         score: 0,
-        reason: "Listado de carpeta."
+        reason: "Listado de carpeta.",
       }));
 
       const answer = files.length
@@ -82,7 +81,7 @@ export class SearchService {
         query,
         answer,
         files,
-        meta: { mode: "list", explain: plan.explain }
+        meta: { mode: "list", explain: plan.explain ?? "" },
       };
     }
 
@@ -95,11 +94,8 @@ export class SearchService {
       folderId: driveFolderId,
       driveExpr,
       pageSize: plan.candidatesK ?? 40,
-      mimeTypes: plan.mimeTypes,
-      dateRange: plan.dateRange
     });
 
-    
     // RERANK
     const shouldRerank = plan.shouldRerank !== false && candidates.length > 3;
     let results;
@@ -109,7 +105,7 @@ export class SearchService {
       results = await this.vertex.rerank({
         userQuery: query,
         candidates: topForRerank,
-        topK: finalTopK
+        topK: finalTopK,
       });
     } else {
       results = candidates.slice(0, finalTopK).map((d) => ({
@@ -117,25 +113,24 @@ export class SearchService {
         title: d.name,
         link: d.webViewLink,
         score: 0,
-        reason: "Coincidencia directa en Drive."
+        reason: "Coincidencia directa en Drive.",
       }));
     }
 
-    
     // RESPUESTA NATURAL + FILES
     const files = results.map((r) => ({
       id: r.id,
       title: r.title,
       link: r.link,
       score: r.score,
-      reason: r.reason
+      reason: r.reason,
     }));
 
     let answer = "";
     if (files.length > 0) {
       answer = await this.vertex.answerWithFiles({
         userQuery: query,
-        files: files.slice(0, 10)
+        files: files.slice(0, 10),
       });
     }
 
@@ -154,10 +149,10 @@ export class SearchService {
       files,
       meta: {
         mode: "search",
-        explain: plan.explain,
+        explain: plan.explain ?? "",
         candidates: candidates.length,
-        reranked: shouldRerank
-      }
+        reranked: shouldRerank,
+      },
     };
   }
 }
