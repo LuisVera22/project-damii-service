@@ -5,6 +5,11 @@ export const DateRangeSchema = z.object({
   to: z.string().nullable().optional(),   // YYYY-MM-DD
 });
 
+export const SearchRequestSchema = z.object({
+  query: z.string().min(1),
+  topK: z.number().int().min(1).max(20).optional()
+});
+
 export const PlannerModeSchema = z.enum(["search", "recent", "list"]);
 
 export const SortSchema = z.enum(["relevance", "modifiedTime", "createdTime"]);

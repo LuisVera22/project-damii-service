@@ -1,7 +1,6 @@
 import { extractJson } from "../utils/json.js";
 
 export class VertexClient {
-  // ... lo que ya tienes (buildPlan, rerank, etc.)
 
   async answerWithFiles({ userQuery, files }) {
     const prompt = `
