@@ -37,9 +37,7 @@ export class DriveClient {
       q,
       pageSize,
       pageToken: pageToken || undefined,
-      // Orden: primero carpetas, luego nombre
       orderBy: "folder,name",
-      // Campos que necesitamos
       fields:
         "nextPageToken,files(id,name,mimeType,createdTime,modifiedTime,parents,webViewLink,iconLink)",
       supportsAllDrives: true,
