@@ -10,40 +10,47 @@ export class VertexClient {
 
   async buildPlan({ userQuery, defaultTopK }) {
     const prompt = `
-      Eres un planificador para buscar en Google Drive dentro de UNA carpeta.
+    Eres un planificador para una biblioteca en Google Drive (dentro de UNA carpeta).
+    Devuelve SOLO JSON válido.
 
-      Devuelve SOLO JSON válido según este esquema:
+    Esquema:
+    {
+      "mode": "search|recent|title|summarize",
+      "driveQuery": "string o null",
+      "titleQuery": "string o null",
+      "mimeTypes": ["..."],
+      "timeRange": {"from":"YYYY-MM-DD o null","to":"YYYY-MM-DD o null"},
+      "sort": "relevance|modifiedTime|createdTime",
+      "topK": ${defaultTopK},
+      "candidatesK": 40,
+      "shouldRerank": true,
+      "summary": {"fileId":"... o null","titleQuery":"... o null","maxChars":12000},
+      "explain": "1 línea"
+    }
 
-      {
-        "mode": "search|recent|list",
-        "driveQuery": "string o null",
-        "mimeTypes": ["..."],
-        "dateRange": {"from":"YYYY-MM-DD o null","to":"YYYY-MM-DD o null"},
-        "sort": "relevance|modifiedTime|createdTime",
-        "topK": ${defaultTopK},
-        "candidatesK": 40,
-        "shouldRerank": true,
-        "explain": "1 línea sobre por qué elegiste ese modo"
-      }
+    REGLAS:
+    - Si el usuario pide "últimos/recientes/nuevos", mode="recent", sort="modifiedTime".
+    - Si el usuario menciona un nombre de archivo específico (ej: "apuntes-clase1", "capitulo 2", ".pdf"), mode="title" y usa titleQuery.
+    - Si el usuario pide "resume/resúmeme/resumen de" un documento/libro, mode="summarize".
+      - Si menciona ID, pon summary.fileId.
+      - Si menciona el nombre, pon summary.titleQuery con el nombre.
+    - Si el usuario pide un tema/contexto ("algoritmia", "kotlin android"), mode="search" y driveQuery con sintaxis Drive:
+      (name contains 'x' or fullText contains 'x') and ...
+    - NO incluyas folderId, ni trashed=false.
+    - No inventes información.
+    - Devuelve SOLO JSON.
 
-      REGLAS:
-      - Si el usuario pide “últimos/recientes/nuevos/cargados”, usa mode="recent" y sort="modifiedTime". driveQuery debe ser null.
-      - Si el usuario pide “listar/mostrar archivos”, usa mode="list" y sort="modifiedTime". driveQuery debe ser null.
-      - Si el usuario pide un tema, usa mode="search" y driveQuery con sintaxis Drive:
-        ejemplo: (name contains 'kotlin' or fullText contains 'kotlin') and (name contains 'android' or fullText contains 'android')
-      - NO incluyas folderId, ni trashed=false.
-      - No inventes información.
-      - Devuelve SOLO JSON.
-
-      Usuario: ${userQuery}
-      `.trim();
+    Usuario: ${userQuery}
+    `.trim();
 
     const resp = await this.model.generateContent({
       contents: [{ role: "user", parts: [{ text: prompt }] }],
     });
 
     const text =
-      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ?? "";
+      resp?.response?.candidates?.[0]?.content?.parts
+        ?.map((p) => p.text)
+        .join("") ?? "";
     const json = extractJson(text);
 
     let plan;
@@ -107,7 +114,8 @@ export class VertexClient {
         topK: defaultTopK,
         candidatesK: 40,
         shouldRerank: false,
-        explain: "Fallback: intención de archivos recientes detectada por keywords.",
+        explain:
+          "Fallback: intención de archivos recientes detectada por keywords.",
       };
     }
 
@@ -143,7 +151,9 @@ export class VertexClient {
     });
 
     const text =
-      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ?? "";
+      resp?.response?.candidates?.[0]?.content?.parts
+        ?.map((p) => p.text)
+        .join("") ?? "";
     const json = extractJson(text);
 
     try {
@@ -183,7 +193,9 @@ export class VertexClient {
     });
 
     const text =
-      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ?? "";
+      resp?.response?.candidates?.[0]?.content?.parts
+        ?.map((p) => p.text)
+        .join("") ?? "";
     const json = extractJson(text);
 
     let ranked = [];
@@ -226,5 +238,36 @@ export class VertexClient {
     }
 
     return out.slice(0, topK);
+  }
+
+  async summarizeText({ userQuery, docTitle, docText, mimeType }) {
+    const prompt = `
+    Eres un asistente que resume documentos.
+    Si NO hay texto (docText vacío), dilo claramente y sugiere abrir el archivo.
+
+    Devuelve SOLO JSON: {"answer":"..."}
+
+    Usuario: ${userQuery}
+    Documento: ${docTitle}
+    mimeType: ${mimeType}
+    Texto (puede estar vacío):
+    ${docText}
+    `.trim();
+
+    const resp = await this.model.generateContent({
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+    });
+
+    const text =
+      resp?.response?.candidates?.[0]?.content?.parts
+        ?.map((p) => p.text)
+        .join("") ?? "";
+    const json = extractJson(text);
+
+    try {
+      return JSON.parse(json)?.answer ?? "";
+    } catch {
+      return "";
+    }
   }
 }

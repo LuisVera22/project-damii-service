@@ -9,8 +9,14 @@ export class DriveClient {
     this.drive = google.drive({ version: "v3", auth });
   }
 
-  async searchInFolder({ folderId, driveExpr, pageSize }) {
-    const q = buildDriveQ({ folderId, driveExpr });
+  async searchInFolder({
+    folderId,
+    driveExpr,
+    pageSize,
+    mimeTypes,
+    timeRange,
+  }) {
+    const q = buildDriveQ({ folderId, driveExpr, mimeTypes, timeRange });
 
     const res = await this.drive.files.list({
       q,
@@ -73,5 +79,31 @@ export class DriveClient {
     });
 
     return res.data.files ?? [];
+  }
+
+  async getFileMeta(fileId) {
+    const res = await this.drive.files.get({
+      fileId,
+      fields: "id,name,mimeType,webViewLink,modifiedTime",
+      supportsAllDrives: true,
+    });
+    return res.data;
+  }
+
+  async exportGoogleDocText(fileId) {
+    // Solo funciona para Google Docs (application/vnd.google-apps.document)
+    const res = await this.drive.files.export(
+      { fileId, mimeType: "text/plain" },
+      { responseType: "text" }
+    );
+    return res.data;
+  }
+
+  async downloadTextFile(fileId) {
+    const res = await this.drive.files.get(
+      { fileId, alt: "media", supportsAllDrives: true },
+      { responseType: "text" }
+    );
+    return res.data;
   }
 }
