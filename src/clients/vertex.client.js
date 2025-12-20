@@ -30,11 +30,11 @@ export class VertexClient {
 
     REGLAS:
     - Si el usuario pide "últimos/recientes/nuevos", mode="recent", sort="modifiedTime".
-    - Si el usuario menciona un nombre de archivo específico (ej: "apuntes-clase1", "capitulo 2", ".pdf"), mode="title" y usa titleQuery.
-    - Si el usuario pide "resume/resúmeme/resumen de" un documento/libro, mode="summarize".
+    - Si el usuario menciona un nombre de archivo específico o puedes buscar por similitud y/o intención, mode="title" y usa titleQuery.
+    - Si el usuario pide "resume/resúmeme/resumen de" un documento/libro/texto, mode="summarize".
       - Si menciona ID, pon summary.fileId.
       - Si menciona el nombre, pon summary.titleQuery con el nombre.
-    - Si el usuario pide un tema/contexto ("algoritmia", "kotlin android"), mode="search" y driveQuery con sintaxis Drive:
+    - Si el usuario tiene la intención o pide un tema/contexto, mode="search" y driveQuery con sintaxis Drive:
       (name contains 'x' or fullText contains 'x') and ...
     - NO incluyas folderId, ni trashed=false.
     - No inventes información.
