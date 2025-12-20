@@ -1,4 +1,5 @@
 import { HttpError } from "../utils/errors.js";
+import { safeToken } from "../utils/json.js";
 
 export class SearchService {
   constructor({ env, driveClient, vertexClient }) {
@@ -10,42 +11,96 @@ export class SearchService {
   async search({ query, topK }) {
     const {
       driveFolderId,
-      maxDriveQueries,
-      pageSizePerQuery,
       rerankTopN,
       defaultTopK
     } = this.env;
 
-    if (!driveFolderId) throw new HttpError(500, "DRIVE_FOLDER_ID no configurado");
+    if (!driveFolderId) {
+      throw new HttpError(500, "DRIVE_FOLDER_ID no configurado");
+    }
 
-    // 1) IA: plan
+    // 1) IA → planner simple
     const plan = await this.vertex.buildPlan({
       userQuery: query,
-      maxDriveQueries,
       defaultTopK
     });
 
     const finalTopK = Math.max(1, Math.min(topK ?? plan.topK ?? defaultTopK, 20));
 
-    // 2) Drive: múltiples queries + dedupe
-    const dedup = new Map();
-    const usedQueries = (plan.queries ?? []).slice(0, maxDriveQueries);
-
-    for (const dq of usedQueries) {
-      const docs = await this.drive.searchInFolder({
+    // MODE: RECENT  (últimos archivos)
+    if (plan.mode === "recent") {
+      const docs = await this.drive.listRecentInFolder({
         folderId: driveFolderId,
-        driveExpr: dq.driveExpr,
-        pageSize: pageSizePerQuery
+        pageSize: finalTopK
       });
 
-      for (const d of docs) {
-        if (!dedup.has(d.id)) dedup.set(d.id, d);
-      }
+      const files = docs.map((d) => ({
+        id: d.id,
+        title: d.name,
+        link: d.webViewLink,
+        score: 0,
+        reason: "Archivo reciente (ordenado por fecha de modificación)."
+      }));
+
+      const answer = files.length
+        ? `Aquí tienes los ${files.length} archivos más recientes de tu carpeta.`
+        : "No encontré archivos recientes en tu carpeta.";
+
+      return {
+        status: "ok",
+        total: files.length,
+        query,
+        answer,
+        files,
+        meta: { mode: "recent", explain: plan.explain }
+      };
     }
 
-    const candidates = Array.from(dedup.values());
+    // MODE: LIST  (listar carpeta)
+    if (plan.mode === "list") {
+      const resp = await this.drive.listFolder({
+        folderId: driveFolderId,
+        pageSize: finalTopK,
+        pageToken: null
+      });
 
-    // 3) Rerank (gating simple)
+      const files = (resp.files ?? resp).map((d) => ({
+        id: d.id,
+        title: d.name ?? d.nombre,
+        link: d.webViewLink ?? d.vistaWeb,
+        score: 0,
+        reason: "Listado de carpeta."
+      }));
+
+      const answer = files.length
+        ? `Aquí tienes ${files.length} elementos de la carpeta.`
+        : "No encontré archivos para listar.";
+
+      return {
+        status: "ok",
+        total: files.length,
+        query,
+        answer,
+        files,
+        meta: { mode: "list", explain: plan.explain }
+      };
+    }
+
+    // MODE: SEARCH (búsqueda semántica)
+    const driveExpr =
+      plan.driveQuery ||
+      `name contains '${safeToken(query)}' or fullText contains '${safeToken(query)}'`;
+
+    const candidates = await this.drive.searchInFolder({
+      folderId: driveFolderId,
+      driveExpr,
+      pageSize: plan.candidatesK ?? 40,
+      mimeTypes: plan.mimeTypes,
+      dateRange: plan.dateRange
+    });
+
+    
+    // RERANK
     const shouldRerank = plan.shouldRerank !== false && candidates.length > 3;
     let results;
 
@@ -66,7 +121,8 @@ export class SearchService {
       }));
     }
 
-    // 4) Respuesta en lenguaje natural (sin leer contenido; usa metadata + reasons)
+    
+    // RESPUESTA NATURAL + FILES
     const files = results.map((r) => ({
       id: r.id,
       title: r.title,
@@ -79,15 +135,15 @@ export class SearchService {
     if (files.length > 0) {
       answer = await this.vertex.answerWithFiles({
         userQuery: query,
-        files: files.slice(0, 10) // no mandes demasiados
+        files: files.slice(0, 10)
       });
     }
 
     if (!answer) {
       answer =
         files.length === 0
-          ? "No encontré documentos relacionados en tu carpeta. Prueba con otra frase o revisa permisos/estructura de carpetas."
-          : `Encontré ${files.length} archivo(s) relacionados. Revisa la lista y dime cuál quieres abrir o si deseas refinar la búsqueda.`;
+          ? "No encontré documentos relacionados en tu carpeta. Prueba con otra frase."
+          : `Encontré ${files.length} archivo(s) relacionados. Revisa la lista y dime cuál quieres abrir.`;
     }
 
     return {
@@ -96,11 +152,9 @@ export class SearchService {
       query,
       answer,
       files,
-      // si quieres conservar diagnóstico interno:
       meta: {
-        intent: plan.intent,
-        expandedTerms: plan.expandedTerms ?? [],
-        usedQueries: usedQueries.length,
+        mode: "search",
+        explain: plan.explain,
         candidates: candidates.length,
         reranked: shouldRerank
       }

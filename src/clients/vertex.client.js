@@ -10,30 +10,32 @@ export class VertexClient {
 
   async buildPlan({ userQuery, maxDriveQueries, defaultTopK }) {
     const prompt = `
-        Eres un "search planner" para Google Drive.
-        El usuario escribe una intención en lenguaje natural y tú produces un plan para buscar archivos dentro de UNA carpeta.
+      Eres un planificador para buscar en Google Drive dentro de UNA carpeta.
 
-        REGLAS:
-        - Devuelve SOLO JSON válido (sin texto extra, sin markdown).
-        - driveExpr debe usar sintaxis de Drive: name contains 'x', fullText contains 'x', and/or/or, y paréntesis.
-        - NO incluyas: '<FOLDER_ID>' in parents, ni trashed=false (eso lo agrega el backend).
-        - Genera varias estrategias (título, contenido, expansión, material didáctico).
-        - Limita queries a ${maxDriveQueries}.
-        - Incluye mimeTypes sugeridos si aplica (pdf/docx/pptx).
+      Devuelve SOLO JSON válido según este esquema:
 
-        Usuario: ${userQuery}
+      {
+        "mode": "search|recent|list",
+        "driveQuery": "string o null",
+        "mimeTypes": ["..."],
+        "dateRange": {"from":"YYYY-MM-DD o null","to":"YYYY-MM-DD o null"},
+        "sort": "relevance|modifiedTime|createdTime",
+        "topK": ${defaultTopK},
+        "candidatesK": 40,
+        "shouldRerank": true,
+        "explain": "1 línea sobre por qué elegiste ese modo"
+      }
 
-        Esquema:
-        {
-            "intent": "...",
-            "expandedTerms": ["..."],
-            "queries": [{"kind":"title|content|expanded|tutorial","driveExpr":"..."}],
-            "mimeTypes": ["..."],
-            "preferRecentYears": 3,
-            "candidatesK": 40,
-            "topK": ${defaultTopK},
-            "shouldRerank": true
-        }
+      REGLAS:
+      - Si el usuario pide “últimos/recientes/nuevos/cargados”, usa mode="recent" y sort="modifiedTime". driveQuery debe ser null.
+      - Si el usuario pide “listar/mostrar archivos”, usa mode="list" y sort="modifiedTime". driveQuery debe ser null.
+      - Si el usuario pide un tema, usa mode="search" y driveQuery usando sintaxis Drive:
+        ejemplo: (name contains 'kotlin' or fullText contains 'kotlin') and (name contains 'android' or fullText contains 'android')
+      - NO incluyas folderId, ni trashed=false.
+      - NO uses operadores desconocidos.
+      - No inventes información.
+
+      Usuario: ${userQuery}
     `.trim();
 
     const resp = await this.model.generateContent({
@@ -56,38 +58,82 @@ export class VertexClient {
 
     const parsed = SearchPlanSchema.safeParse(plan);
     if (!parsed.success) {
-      const tok = safeToken(userQuery);
-      return this.fallbackPlan(tok, defaultTopK, maxDriveQueries);
+      // fallback robusto: detecta "recent" por heurística mínima y sino search
+      return this.fallbackPlanSimple(userQuery, defaultTopK);
     }
 
     const p = parsed.data;
 
-    // hardening
-    const queries = (p.queries ?? []).slice(0, maxDriveQueries);
+    // hardening numérico
     const topK = Math.max(1, Math.min(p.topK ?? defaultTopK, 20));
     const candidatesK = Math.max(10, Math.min(p.candidatesK ?? 40, 100));
 
-    const finalPlan = {
-      intent: p.intent ?? "unknown",
-      expandedTerms: p.expandedTerms ?? [],
-      queries: queries.length
-        ? queries
-        : [
-            {
-              kind: "baseline",
-              driveExpr: `name contains '${safeToken(
-                userQuery
-              )}' or fullText contains '${safeToken(userQuery)}'`,
-            },
-          ],
-      mimeTypes: p.mimeTypes ?? [],
-      preferRecentYears: p.preferRecentYears ?? 3,
-      candidatesK,
-      topK,
-      shouldRerank: p.shouldRerank !== false,
-    };
+    // hardening string
+    const mode = p.mode ?? "search";
+    const sort = p.sort ?? (mode === "search" ? "relevance" : "modifiedTime");
 
-    return finalPlan;
+    // En recent/list no debería haber driveQuery
+    const driveQuery =
+      mode === "search"
+        ? p.driveQuery && String(p.driveQuery).trim()
+          ? String(p.driveQuery)
+          : null
+        : null;
+
+    return {
+      mode,
+      driveQuery,
+      mimeTypes: p.mimeTypes ?? [],
+      dateRange: p.dateRange ?? { from: null, to: null },
+      sort,
+      topK,
+      candidatesK,
+      shouldRerank: p.shouldRerank !== false,
+      explain: p.explain ?? "",
+    };
+  }
+
+  fallbackPlanSimple(userQuery, defaultTopK) {
+    const q = String(userQuery ?? "").toLowerCase();
+    const isRecent =
+      q.includes("último") ||
+      q.includes("ultimos") ||
+      q.includes("últimos") ||
+      q.includes("reciente") ||
+      q.includes("recientes") ||
+      q.includes("nuevo") ||
+      q.includes("nuevos") ||
+      q.includes("cargado") ||
+      q.includes("cargados");
+
+    if (isRecent) {
+      return {
+        mode: "recent",
+        driveQuery: null,
+        mimeTypes: [],
+        dateRange: { from: null, to: null },
+        sort: "modifiedTime",
+        topK: defaultTopK,
+        candidatesK: 40,
+        shouldRerank: false,
+        explain:
+          "Fallback: intención de archivos recientes detectada por keywords.",
+      };
+    }
+
+    // fallback search básico
+    const tok = safeToken(userQuery);
+    return {
+      mode: "search",
+      driveQuery: `name contains '${tok}' or fullText contains '${tok}'`,
+      mimeTypes: [],
+      dateRange: { from: null, to: null },
+      sort: "relevance",
+      topK: defaultTopK,
+      candidatesK: 40,
+      shouldRerank: true,
+      explain: "Fallback: búsqueda básica por nombre o contenido.",
+    };
   }
 
   fallbackPlan(tok, defaultTopK, maxDriveQueries) {
