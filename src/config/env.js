@@ -17,7 +17,9 @@ export const env = {
   maxDriveQueries: num(process.env.MAX_DRIVE_QUERIES, 4),
   pageSizePerQuery: num(process.env.PAGE_SIZE_PER_QUERY, 20),
   rerankTopN: num(process.env.RERANK_TOP_N, 25),
-  defaultTopK: num(process.env.DEFAULT_TOP_K, 10)
+  defaultTopK: num(process.env.DEFAULT_TOP_K, 10),
+
+  firebaseServiceAccountJson: process.env.FIREBASE_SERVICE_ACCOUNT_JSON
 };
 
 export function assertEnv() {

@@ -11,7 +11,13 @@ export class SearchController {
       const parsed = SearchRequestSchema.safeParse(req.body);
       if (!parsed.success) throw new HttpError(400, "query es requerido");
 
-      const payload = await this.searchService.search(parsed.data);
+      const uid = req.user?.uid;
+
+      const payload = await this.searchService.search({
+        ...parsed.data,
+        uid, // opcional: para personalización o logging
+      });
+
       res.json(payload);
     } catch (err) {
       next(err);
