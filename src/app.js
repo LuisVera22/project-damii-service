@@ -5,7 +5,7 @@ import { createSearchRoutes } from "./routes/search.routes.js";
 import { createDriveRoutes } from "./routes/drive.routes.js";
 import { requireFirebaseAuth } from "./middleware/firebaseAuth.middleware.js";
 
-export function createApp({ searchRoutes, driveRoutes }) {
+export function createApp({ searchRoutes, driveRoutes, usersRoutes }) {
   const app = express();
 
   app.use(cors());
