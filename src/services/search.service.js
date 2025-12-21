@@ -11,17 +11,37 @@ export class SearchService {
   async search({ query, topK }) {
     const { driveFolderId, rerankTopN, defaultTopK } = this.env;
 
+    // driveFolderId es la "carpeta raíz" del árbol a buscar
     if (!driveFolderId) throw new HttpError(500, "DRIVE_FOLDER_ID no configurado");
 
+    // 0) Intención desde lenguaje natural (Vertex plan)
     const plan = await this.vertex.buildPlan({ userQuery: query, defaultTopK });
     const finalTopK = Math.max(1, Math.min(topK ?? plan.topK ?? defaultTopK, 20));
 
-    // 1) RECENT
+    // Helper: búsqueda recursiva dentro del árbol (raíz + descendientes)
+    const searchTree = async ({ driveExpr, pageSize, mimeTypes, timeRange }) => {
+      return this.drive.searchInTree({
+        rootFolderId: driveFolderId,
+        driveExpr,
+        pageSize,
+        mimeTypes,
+        timeRange,
+      });
+    };
+
+    // 1) RECENT (recursivo)
     if (plan.mode === "recent") {
-      const docs = await this.drive.listRecentInFolder({ folderId: driveFolderId, pageSize: finalTopK });
+      const docs = await this.drive.listRecentInTree({
+        rootFolderId: driveFolderId,
+        pageSize: finalTopK,
+      });
+
       const files = (docs ?? []).map((d) => ({
-        id: d.id, title: d.name, link: d.webViewLink, score: 0,
-        reason: "Archivo reciente (ordenado por fecha de modificación)."
+        id: d.id,
+        title: d.name,
+        link: d.webViewLink,
+        score: 0,
+        reason: "Archivo reciente (ordenado por fecha de modificación).",
       }));
 
       return {
@@ -29,34 +49,37 @@ export class SearchService {
         total: files.length,
         query,
         answer: files.length
-          ? `Aquí tienes los ${files.length} archivos más recientes.`
-          : "No encontré archivos recientes en tu carpeta.",
+          ? `Aquí tienes los ${files.length} archivos más recientes dentro del árbol.`
+          : "No encontré archivos recientes dentro del árbol de tu carpeta raíz.",
         files,
-        meta: { mode: "recent", explain: plan.explain ?? "" }
+        meta: { mode: "recent", explain: plan.explain ?? "" },
       };
     }
 
-    // 2) TITLE (alta precisión por nombre)
+    // 2) TITLE (alta precisión por nombre, pero recursivo)
     if (plan.mode === "title") {
-      const title = safeToken(plan.titleQuery || query);
-      const driveExpr = `name contains '${title}'`; // precisión por título
+      // Usa el plan (si viene armado) para mejorar coincidencia + no carpetas
+      const fallbackTitle = safeToken(plan.titleQuery || query);
+      const driveExpr = plan.driveQuery || `name contains '${fallbackTitle}'`;
 
-      const candidates = await this.drive.searchInFolder({
-        folderId: driveFolderId,
+      const candidates = await searchTree({
         driveExpr,
         pageSize: Math.max(finalTopK, 10),
         mimeTypes: plan.mimeTypes,
-        timeRange: plan.timeRange
+        timeRange: plan.timeRange,
       });
 
       const results = candidates.slice(0, finalTopK).map((d) => ({
-        id: d.id, title: d.name, link: d.webViewLink, score: 0,
-        reason: "Coincidencia por título/nombre."
+        id: d.id,
+        title: d.name,
+        link: d.webViewLink,
+        score: 0,
+        reason: "Coincidencia por título/nombre dentro del árbol.",
       }));
 
       const answer = results.length
-        ? `Encontré ${results.length} archivo(s) que coinciden con el título solicitado.`
-        : "No encontré archivos con ese nombre. Prueba con una parte del título o revisa la carpeta.";
+        ? `Encontré ${results.length} archivo(s) que coinciden con el título solicitado dentro del árbol.`
+        : "No encontré archivos con ese nombre dentro del árbol. Prueba con una parte del título.";
 
       return {
         status: "ok",
@@ -64,24 +87,28 @@ export class SearchService {
         query,
         answer,
         files: results,
-        meta: { mode: "title", explain: plan.explain ?? "", candidates: candidates.length }
+        meta: { mode: "title", explain: plan.explain ?? "", candidates: candidates.length },
       };
     }
 
-    // 3) SUMMARIZE
+    // 3) SUMMARIZE (resolver archivo dentro del árbol y resumir)
     if (plan.mode === "summarize") {
       const maxChars = plan.summary?.maxChars ?? 12000;
 
-      // 3.1) resolver fileId: directo o por titleQuery
+      // 3.1) resolver fileId: directo o por titleQuery (recursivo)
       let fileId = plan.summary?.fileId ?? null;
 
       if (!fileId) {
         const tq = safeToken(plan.summary?.titleQuery || query);
-        const pick = await this.drive.searchInFolder({
-          folderId: driveFolderId,
-          driveExpr: `name contains '${tq}'`,
-          pageSize: 5
+
+        // Usa plan.driveQuery si viene, para que el planner controle candidatos
+        const driveExpr = plan.driveQuery || `name contains '${tq}'`;
+
+        const pick = await searchTree({
+          driveExpr,
+          pageSize: 5,
         });
+
         fileId = pick?.[0]?.id ?? null;
       }
 
@@ -90,18 +117,18 @@ export class SearchService {
           status: "ok",
           total: 0,
           query,
-          answer: "No pude identificar qué documento resumir. Intenta decir el nombre exacto del archivo.",
+          answer:
+            "No pude identificar qué documento resumir dentro del árbol. Intenta decir el nombre exacto del archivo.",
           files: [],
-          meta: { mode: "summarize", explain: plan.explain ?? "" }
+          meta: { mode: "summarize", explain: plan.explain ?? "" },
         };
       }
 
+      // 3.2) meta + extracción de texto
       const meta = await this.drive.getFileMeta(fileId);
-
-      // 3.2) extraer texto (MVP: Google Docs + text/plain)
-      let text = "";
       const mt = meta.mimeType;
 
+      let text = "";
       try {
         if (mt === "application/vnd.google-apps.document") {
           text = await this.drive.exportGoogleDocText(fileId);
@@ -114,21 +141,23 @@ export class SearchService {
         text = "";
       }
 
-      // 3.3) pedir resumen a Vertex
+      // 3.3) resumen
       const summary = await this.vertex.summarizeText({
         userQuery: query,
         docTitle: meta.name,
         docText: text ? String(text).slice(0, maxChars) : "",
-        mimeType: mt
+        mimeType: mt,
       });
 
-      const files = [{
-        id: meta.id,
-        title: meta.name,
-        link: meta.webViewLink,
-        score: 1,
-        reason: "Documento resumido."
-      }];
+      const files = [
+        {
+          id: meta.id,
+          title: meta.name,
+          link: meta.webViewLink,
+          score: 1,
+          reason: "Documento resumido.",
+        },
+      ];
 
       return {
         status: "ok",
@@ -136,21 +165,20 @@ export class SearchService {
         query,
         answer: summary || `Puedo resumir “${meta.name}”, pero no pude extraer texto de este tipo de archivo aún.`,
         files,
-        meta: { mode: "summarize", mimeType: mt, explain: plan.explain ?? "" }
+        meta: { mode: "summarize", mimeType: mt, explain: plan.explain ?? "" },
       };
     }
 
-    // 4) SEARCH (contexto)
+    // 4) SEARCH (contexto: nombre + fullText + filtros, recursivo)
     const driveExpr =
       plan.driveQuery ||
       `name contains '${safeToken(query)}' or fullText contains '${safeToken(query)}'`;
 
-    const candidates = await this.drive.searchInFolder({
-      folderId: driveFolderId,
+    const candidates = await searchTree({
       driveExpr,
       pageSize: plan.candidatesK ?? 40,
       mimeTypes: plan.mimeTypes,
-      timeRange: plan.timeRange
+      timeRange: plan.timeRange,
     });
 
     const shouldRerank = plan.shouldRerank !== false && candidates.length > 3;
@@ -161,7 +189,7 @@ export class SearchService {
       results = await this.vertex.rerank({
         userQuery: query,
         candidates: topForRerank,
-        topK: finalTopK
+        topK: finalTopK,
       });
     } else {
       results = candidates.slice(0, finalTopK).map((d) => ({
@@ -169,12 +197,16 @@ export class SearchService {
         title: d.name,
         link: d.webViewLink,
         score: 0,
-        reason: "Coincidencia directa en Drive."
+        reason: "Coincidencia directa en Drive dentro del árbol.",
       }));
     }
 
     const files = results.map((r) => ({
-      id: r.id, title: r.title, link: r.link, score: r.score, reason: r.reason
+      id: r.id,
+      title: r.title,
+      link: r.link,
+      score: r.score,
+      reason: r.reason,
     }));
 
     let answer = "";
@@ -183,8 +215,8 @@ export class SearchService {
     }
     if (!answer) {
       answer = files.length
-        ? `Encontré ${files.length} archivo(s) relacionados.`
-        : "No encontré documentos relacionados en tu carpeta. Prueba con otra frase.";
+        ? `Encontré ${files.length} archivo(s) relacionados dentro del árbol.`
+        : "No encontré documentos relacionados dentro del árbol. Prueba con otra frase.";
     }
 
     return {
@@ -193,7 +225,12 @@ export class SearchService {
       query,
       answer,
       files,
-      meta: { mode: "search", explain: plan.explain ?? "", candidates: candidates.length, reranked: shouldRerank }
+      meta: {
+        mode: "search",
+        explain: plan.explain ?? "",
+        candidates: candidates.length,
+        reranked: shouldRerank,
+      },
     };
   }
 }
