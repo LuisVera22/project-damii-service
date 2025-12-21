@@ -2,6 +2,23 @@ import { VertexAI } from "@google-cloud/vertexai";
 import { extractJson, safeToken } from "../utils/json.js";
 import { SearchPlanSchema } from "../models/schemas.js";
 
+const FOLDER_MIME = "application/vnd.google-apps.folder";
+const FOLDER_GUARD = `mimeType != '${FOLDER_MIME}'`;
+
+const onlyFiles = (arr = []) =>
+  Array.isArray(arr) ? arr.filter((f) => f?.mimeType !== FOLDER_MIME) : [];
+
+const addFolderGuardToQuery = (q) => {
+  const s = String(q ?? "").trim();
+  if (!s) return FOLDER_GUARD;
+
+  // Evita duplicar el guard si el LLM ya lo puso
+  if (s.includes(FOLDER_MIME) && (s.includes("mimeType !=") || s.includes("mimeType!="))) {
+    return s;
+  }
+  return `(${s}) and ${FOLDER_GUARD}`;
+};
+
 export class VertexClient {
   constructor({ project, location, model }) {
     this.vertexAI = new VertexAI({ project, location });
@@ -37,6 +54,9 @@ export class VertexClient {
     - Si el usuario tiene la intención o pide un tema/contexto, mode="search" y driveQuery con sintaxis Drive:
       (name contains 'x' or fullText contains 'x') and ...
     - NO incluyas folderId, ni trashed=false.
+    - IMPORTANTE: nunca incluyas carpetas; exclúyelas con:
+      ${FOLDER_GUARD}
+      (si hay driveQuery, combínalo con AND)
     - No inventes información.
     - Devuelve SOLO JSON.
 
@@ -48,9 +68,8 @@ export class VertexClient {
     });
 
     const text =
-      resp?.response?.candidates?.[0]?.content?.parts
-        ?.map((p) => p.text)
-        .join("") ?? "";
+      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ??
+      "";
     const json = extractJson(text);
 
     let plan;
@@ -73,21 +92,28 @@ export class VertexClient {
     const mode = p.mode ?? "search";
     const sort = p.sort ?? (mode === "search" ? "relevance" : "modifiedTime");
 
-    const driveQuery =
+    const dateRange = p.dateRange ?? p.timeRange ?? { from: null, to: null };
+
+    const driveQueryRaw =
       mode === "search" && p.driveQuery && String(p.driveQuery).trim()
         ? String(p.driveQuery)
         : null;
+
+    const driveQuery = addFolderGuardToQuery(driveQueryRaw);
 
     return {
       mode,
       driveQuery,
       mimeTypes: p.mimeTypes ?? [],
-      dateRange: p.dateRange ?? { from: null, to: null },
+      dateRange,
       sort,
       topK,
       candidatesK,
       shouldRerank: p.shouldRerank !== false,
       explain: p.explain ?? "",
+      // Si lo usas en otra capa:
+      titleQuery: p.titleQuery ?? null,
+      summary: p.summary ?? null,
     };
   }
 
@@ -107,22 +133,23 @@ export class VertexClient {
     if (isRecent) {
       return {
         mode: "recent",
-        driveQuery: null,
+        // Si tu implementación de "recent" acepta query, esto ayuda.
+        // Si NO la usa, igual estás cubierto con el post-filtro (onlyFiles).
+        driveQuery: FOLDER_GUARD,
         mimeTypes: [],
         dateRange: { from: null, to: null },
         sort: "modifiedTime",
         topK: defaultTopK,
         candidatesK: 40,
         shouldRerank: false,
-        explain:
-          "Fallback: intención de archivos recientes detectada por keywords.",
+        explain: "Fallback: intención de archivos recientes detectada por keywords.",
       };
     }
 
     const tok = safeToken(userQuery);
     return {
       mode: "search",
-      driveQuery: `name contains '${tok}' or fullText contains '${tok}'`,
+      driveQuery: addFolderGuardToQuery(`name contains '${tok}' or fullText contains '${tok}'`),
       mimeTypes: [],
       dateRange: { from: null, to: null },
       sort: "relevance",
@@ -134,6 +161,9 @@ export class VertexClient {
   }
 
   async answerWithFiles({ userQuery, files }) {
+    // Seguridad: jamás pasar carpetas al modelo
+    const filtered = onlyFiles(files);
+
     const prompt = `
     Eres un asistente de biblioteca.
     Con base en la consulta del usuario y una lista de archivos encontrados, responde en 2–4 oraciones.
@@ -143,7 +173,7 @@ export class VertexClient {
     {"answer":"..."}
 
     Usuario: ${userQuery}
-    Archivos: ${JSON.stringify(files)}
+    Archivos: ${JSON.stringify(filtered)}
     `.trim();
 
     const resp = await this.model.generateContent({
@@ -151,9 +181,8 @@ export class VertexClient {
     });
 
     const text =
-      resp?.response?.candidates?.[0]?.content?.parts
-        ?.map((p) => p.text)
-        .join("") ?? "";
+      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ??
+      "";
     const json = extractJson(text);
 
     try {
@@ -164,7 +193,10 @@ export class VertexClient {
   }
 
   async rerank({ userQuery, candidates, topK }) {
-    const items = candidates.map((d) => ({
+    // Seguridad: jamás rankear carpetas
+    const filteredCandidates = onlyFiles(candidates);
+
+    const items = filteredCandidates.map((d) => ({
       id: d.id,
       title: d.name,
       mimeType: d.mimeType,
@@ -193,9 +225,8 @@ export class VertexClient {
     });
 
     const text =
-      resp?.response?.candidates?.[0]?.content?.parts
-        ?.map((p) => p.text)
-        .join("") ?? "";
+      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ??
+      "";
     const json = extractJson(text);
 
     let ranked = [];
@@ -205,7 +236,7 @@ export class VertexClient {
       ranked = [];
     }
 
-    const byId = new Map(candidates.map((d) => [d.id, d]));
+    const byId = new Map(filteredCandidates.map((d) => [d.id, d]));
     const out = [];
 
     for (const r of ranked) {
@@ -224,7 +255,7 @@ export class VertexClient {
 
     if (out.length < topK) {
       const used = new Set(out.map((x) => x.id));
-      for (const d of candidates) {
+      for (const d of filteredCandidates) {
         if (out.length >= topK) break;
         if (used.has(d.id)) continue;
         out.push({
@@ -259,9 +290,8 @@ export class VertexClient {
     });
 
     const text =
-      resp?.response?.candidates?.[0]?.content?.parts
-        ?.map((p) => p.text)
-        .join("") ?? "";
+      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ??
+      "";
     const json = extractJson(text);
 
     try {
