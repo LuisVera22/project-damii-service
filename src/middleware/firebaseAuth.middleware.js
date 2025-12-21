@@ -58,13 +58,31 @@ export async function optionalFirebaseAuth(req, _res, next) {
   return next();
 }
 
-export function requireSuperadmin(req, res, next) {
-  // tu rol viene en custom claims => req.user.claims.role
-  const role = req.user?.claims?.role;
+export async function requireSuperadmin(req, res, next) {
+  try {
+    const admin = getFirebaseAdmin();
+    const uid = req.user?.uid;
 
-  if (role !== "superadmin") {
-    return res.status(403).json({ message: "Permission denied" });
+    if (!uid) {
+      return res.status(401).json({ message: "Unauthenticated" });
+    }
+
+    const snap = await admin.firestore().doc(`users/${uid}`).get();
+
+    if (!snap.exists) {
+      return res.status(403).json({ message: "User profile not found" });
+    }
+
+    const role = snap.data()?.role;
+
+    if (role !== "superadmin") {
+      return res.status(403).json({ message: "Permission denied" });
+    }
+
+    return next();
+  } catch (e) {
+    console.error("[requireSuperadmin] error:", e);
+    return res.status(500).json({ message: "Internal error" });
   }
-
-  return next();
 }
+
