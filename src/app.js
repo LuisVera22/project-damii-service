@@ -18,6 +18,7 @@ export function createApp({ searchRoutes, driveRoutes }) {
 
   app.use("/api", searchRoutes);
   app.use("/api", driveRoutes);
+  app.use("/api", usersRoutes);
 
   app.use(errorMiddleware);
 

@@ -19,6 +19,11 @@ export const env = {
   rerankTopN: num(process.env.RERANK_TOP_N, 25),
   defaultTopK: num(process.env.DEFAULT_TOP_K, 10),
 
+  resendApiKey: process.env.RESEND_API_KEY,
+  resendFrom: process.env.RESEND_FROM,
+  resetPasswordRedirectUrl:
+    process.env.RESET_PASSWORD_REDIRECT_URL || "http://localhost:4200/auth/sign-in",
+
   firebaseServiceAccountJson: process.env.FIREBASE_SERVICE_ACCOUNT_JSON
 };
 
@@ -26,6 +31,8 @@ export function assertEnv() {
   const missing = [];
   if (!env.gcpProjectId) missing.push("GCP_PROJECT_ID");
   if (!env.driveFolderId) missing.push("DRIVE_FOLDER_ID");
+  if (!env.resendApiKey) missing.push("RESEND_API_KEY");
+  if (!env.resendFrom) missing.push("RESEND_FROM");
 
   if (missing.length) {
     throw new Error(`Faltan variables de entorno: ${missing.join(", ")}`);

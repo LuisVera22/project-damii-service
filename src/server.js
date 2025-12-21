@@ -9,6 +9,9 @@ import { createSearchRoutes } from "./routes/search.routes.js";
 import { DriveService } from "./services/drive.service.js";
 import { DriveController } from "./controllers/drive.controller.js";
 import { createDriveRoutes } from "./routes/drive.routes.js";
+import { UsersService } from "./services/users.service.js";
+import { UsersController } from "./controllers/users.controller.js";
+import { createUsersRoutes } from "./routes/users.routes.js";
 
 
 assertEnv();
@@ -24,17 +27,20 @@ const vertexClient = new VertexClient({
 // Services
 const searchService = new SearchService({ env, driveClient, vertexClient });
 const driveService = new DriveService({ env, driveClient });
+const usersService = new UsersService();
 
 // Controllers
 const searchController = new SearchController({ searchService });
 const driveController = new DriveController({ driveService });
+const usersController = new UsersController({ usersService });
 
 // Routes
 const searchRoutes = createSearchRoutes({ searchController });
 const driveRoutes = createDriveRoutes({ driveController });
+const usersRoutes = createUsersRoutes({ usersController });
 
 // App
-const app = createApp({ searchRoutes, driveRoutes });
+const app = createApp({ searchRoutes, driveRoutes, usersRoutes });
 
 app.listen(env.port, () => {
   console.log(`API listening on :${env.port}`);
