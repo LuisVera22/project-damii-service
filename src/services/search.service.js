@@ -12,14 +12,23 @@ export class SearchService {
     const { driveFolderId, rerankTopN, defaultTopK } = this.env;
 
     // driveFolderId es la "carpeta raíz" del árbol a buscar
-    if (!driveFolderId) throw new HttpError(500, "DRIVE_FOLDER_ID no configurado");
+    if (!driveFolderId)
+      throw new HttpError(500, "DRIVE_FOLDER_ID no configurado");
 
     // 0) Intención desde lenguaje natural (Vertex plan)
     const plan = await this.vertex.buildPlan({ userQuery: query, defaultTopK });
-    const finalTopK = Math.max(1, Math.min(topK ?? plan.topK ?? defaultTopK, 20));
+    const finalTopK = Math.max(
+      1,
+      Math.min(topK ?? plan.topK ?? defaultTopK, 20)
+    );
 
     // Helper: búsqueda recursiva dentro del árbol (raíz + descendientes)
-    const searchTree = async ({ driveExpr, pageSize, mimeTypes, timeRange }) => {
+    const searchTree = async ({
+      driveExpr,
+      pageSize,
+      mimeTypes,
+      timeRange,
+    }) => {
       return this.drive.searchInTree({
         rootFolderId: driveFolderId,
         driveExpr,
@@ -87,7 +96,11 @@ export class SearchService {
         query,
         answer,
         files: results,
-        meta: { mode: "title", explain: plan.explain ?? "", candidates: candidates.length },
+        meta: {
+          mode: "title",
+          explain: plan.explain ?? "",
+          candidates: candidates.length,
+        },
       };
     }
 
@@ -163,7 +176,9 @@ export class SearchService {
         status: "ok",
         total: 1,
         query,
-        answer: summary || `Puedo resumir “${meta.name}”, pero no pude extraer texto de este tipo de archivo aún.`,
+        answer:
+          summary ||
+          `Puedo resumir “${meta.name}”, pero no pude extraer texto de este tipo de archivo aún.`,
         files,
         meta: { mode: "summarize", mimeType: mt, explain: plan.explain ?? "" },
       };
@@ -172,7 +187,9 @@ export class SearchService {
     // 4) SEARCH (contexto: nombre + fullText + filtros, recursivo)
     const driveExpr =
       plan.driveQuery ||
-      `name contains '${safeToken(query)}' or fullText contains '${safeToken(query)}'`;
+      `name contains '${safeToken(query)}' or fullText contains '${safeToken(
+        query
+      )}'`;
 
     const candidates = await searchTree({
       driveExpr,
@@ -185,7 +202,10 @@ export class SearchService {
     let results;
 
     if (shouldRerank) {
-      const topForRerank = candidates.slice(0, Math.min(candidates.length, rerankTopN));
+      const topForRerank = candidates.slice(
+        0,
+        Math.min(candidates.length, rerankTopN)
+      );
       results = await this.vertex.rerank({
         userQuery: query,
         candidates: topForRerank,
@@ -210,13 +230,22 @@ export class SearchService {
     }));
 
     let answer = "";
-    if (files.length > 0) {
-      answer = await this.vertex.answerWithFiles({ userQuery: query, files: files.slice(0, 10) });
-    }
-    if (!answer) {
-      answer = files.length
-        ? `Encontré ${files.length} archivo(s) relacionados dentro del árbol.`
-        : "No encontré documentos relacionados dentro del árbol. Prueba con otra frase.";
+    if (files.length === 0) {
+      // NO hay archivos → mensaje fijo, sin IA
+      answer =
+        "No encontré documentos relacionados. Prueba con otra frase o usa términos más específicos.";
+    } else {
+      // SÍ hay archivos → la IA SOLO describe, nunca niega resultados
+      const aiAnswer = await this.vertex.answerWithFiles({
+        userQuery: query,
+        files: files.slice(0, 10),
+      });
+
+      // Si la IA responde algo raro o vacío, usamos fallback seguro
+      answer =
+        aiAnswer && !/no encontr(e|ó)|no hay|ningún documento/i.test(aiAnswer)
+          ? aiAnswer
+          : `Encontré ${files.length} documento(s) relacionados con tu búsqueda.`;
     }
 
     return {
