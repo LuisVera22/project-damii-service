@@ -5,8 +5,17 @@ import { SearchPlanSchema } from "../models/schemas.js";
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 const FOLDER_GUARD = `mimeType != '${FOLDER_MIME}'`;
 
+const normalizeSpaces = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
+const driveEscape = (s) => String(s ?? "").replace(/'/g, "\\'");
+
+const isFolder = (f) => f?.mimeType === FOLDER_MIME;
+
+/**
+ * Estricto: si NO hay mimeType, se descarta.
+ * Esto evita que se cuelen carpetas cuando Drive API no retorna mimeType por fields.
+ */
 const onlyFiles = (arr = []) =>
-  Array.isArray(arr) ? arr.filter((f) => f?.mimeType !== FOLDER_MIME) : [];
+  Array.isArray(arr) ? arr.filter((f) => f && f.mimeType && !isFolder(f)) : [];
 
 const addFolderGuardToQuery = (q) => {
   const s = String(q ?? "").trim();
@@ -19,6 +28,29 @@ const addFolderGuardToQuery = (q) => {
   return `(${s}) and ${FOLDER_GUARD}`;
 };
 
+/**
+ * Construye un q (Drive) razonable a partir de un título.
+ * Tokeniza y arma un AND para mejorar precisión.
+ */
+const titleToDriveQuery = (title) => {
+  const t = normalizeSpaces(title);
+  if (!t) return FOLDER_GUARD;
+
+  const tokens = t
+    .split(" ")
+    .map((x) => x.trim())
+    .filter((x) => x.length >= 3)
+    .slice(0, 6);
+
+  if (tokens.length === 0) {
+    const tok = safeToken(t);
+    return addFolderGuardToQuery(`name contains '${driveEscape(tok)}'`);
+  }
+
+  const parts = tokens.map((x) => `name contains '${driveEscape(x)}'`);
+  return addFolderGuardToQuery(parts.join(" and "));
+};
+
 export class VertexClient {
   constructor({ project, location, model }) {
     this.vertexAI = new VertexAI({ project, location });
@@ -27,40 +59,42 @@ export class VertexClient {
 
   async buildPlan({ userQuery, defaultTopK }) {
     const prompt = `
-    Eres un planificador para una biblioteca en Google Drive (dentro de UNA carpeta).
-    Devuelve SOLO JSON válido.
+Eres un planificador para una biblioteca en Google Drive (dentro de UNA carpeta).
+Devuelve SOLO JSON válido.
 
-    Esquema:
-    {
-      "mode": "search|recent|title|summarize",
-      "driveQuery": "string o null",
-      "titleQuery": "string o null",
-      "mimeTypes": ["..."],
-      "timeRange": {"from":"YYYY-MM-DD o null","to":"YYYY-MM-DD o null"},
-      "sort": "relevance|modifiedTime|createdTime",
-      "topK": ${defaultTopK},
-      "candidatesK": 40,
-      "shouldRerank": true,
-      "summary": {"fileId":"... o null","titleQuery":"... o null","maxChars":12000},
-      "explain": "1 línea"
-    }
+Esquema:
+{
+  "mode": "search|recent|title|summarize",
+  "driveQuery": "string o null",
+  "titleQuery": "string o null",
+  "mimeTypes": ["..."],
+  "timeRange": {"from":"YYYY-MM-DD o null","to":"YYYY-MM-DD o null"},
+  "sort": "relevance|modifiedTime|createdTime",
+  "topK": ${defaultTopK},
+  "candidatesK": 40,
+  "shouldRerank": true,
+  "summary": {"fileId":"... o null","titleQuery":"... o null","maxChars":12000},
+  "explain": "1 línea"
+}
 
-    REGLAS:
-    - Si el usuario pide "últimos/recientes/nuevos", mode="recent", sort="modifiedTime".
-    - Si el usuario menciona un nombre de archivo específico o puedes buscar por similitud y/o intención, mode="title" y usa titleQuery.
-    - Si el usuario pide "resume/resúmeme/resumen de" un documento/libro/texto, mode="summarize".
-      - Si menciona ID, pon summary.fileId.
-      - Si menciona el nombre, pon summary.titleQuery con el nombre.
-    - Si el usuario tiene la intención o pide un tema/contexto, mode="search" y driveQuery con sintaxis Drive:
-      (name contains 'x' or fullText contains 'x') and ...
-    - NO incluyas folderId, ni trashed=false.
-    - IMPORTANTE: nunca incluyas carpetas; exclúyelas con:
-      ${FOLDER_GUARD}
-      (si hay driveQuery, combínalo con AND)
-    - No inventes información.
-    - Devuelve SOLO JSON.
+REGLAS:
+- Si el usuario pide "últimos/recientes/nuevos", mode="recent", sort="modifiedTime".
+- Si el usuario menciona un nombre de archivo específico o puedes buscar por similitud y/o intención:
+  mode="title", usa titleQuery y TAMBIÉN llena driveQuery para traer candidatos por nombre.
+- Si el usuario pide "resume/resúmeme/resumen de" un documento/libro/texto, mode="summarize".
+  - Si menciona ID, pon summary.fileId.
+  - Si menciona el nombre, pon summary.titleQuery con el nombre.
+  - IMPORTANTE: si usas summary.titleQuery (nombre), TAMBIÉN llena driveQuery para traer candidatos por nombre.
+- Si el usuario tiene la intención o pide un tema/contexto, mode="search" y driveQuery con sintaxis Drive:
+  (name contains 'x' or fullText contains 'x') and ...
+- NO incluyas folderId, ni trashed=false.
+- IMPORTANTE: nunca incluyas carpetas; exclúyelas con:
+  ${FOLDER_GUARD}
+  (si hay driveQuery, combínalo con AND)
+- No inventes información.
+- Devuelve SOLO JSON.
 
-    Usuario: ${userQuery}
+Usuario: ${userQuery}
     `.trim();
 
     const resp = await this.model.generateContent({
@@ -68,8 +102,7 @@ export class VertexClient {
     });
 
     const text =
-      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ??
-      "";
+      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ?? "";
     const json = extractJson(text);
 
     let plan;
@@ -94,11 +127,28 @@ export class VertexClient {
 
     const dateRange = p.dateRange ?? p.timeRange ?? { from: null, to: null };
 
-    const driveQueryRaw =
+    // 1) DriveQuery base (solo si mode=search)
+    let driveQueryRaw =
       mode === "search" && p.driveQuery && String(p.driveQuery).trim()
-        ? String(p.driveQuery)
+        ? String(p.driveQuery).trim()
         : null;
 
+    // 2) Si mode=title, construir query por nombre
+    if (!driveQueryRaw && mode === "title" && p.titleQuery && String(p.titleQuery).trim()) {
+      driveQueryRaw = titleToDriveQuery(p.titleQuery);
+    }
+
+    // 3) Si mode=summarize y no hay fileId pero sí titleQuery, construir query por nombre
+    const sumTitle =
+      p.summary?.titleQuery && String(p.summary.titleQuery).trim()
+        ? String(p.summary.titleQuery).trim()
+        : null;
+
+    if (!driveQueryRaw && mode === "summarize" && !p.summary?.fileId && sumTitle) {
+      driveQueryRaw = titleToDriveQuery(sumTitle);
+    }
+
+    // 4) Si sigue null, al menos aplica guard anti-carpetas
     const driveQuery = addFolderGuardToQuery(driveQueryRaw);
 
     return {
@@ -133,8 +183,6 @@ export class VertexClient {
     if (isRecent) {
       return {
         mode: "recent",
-        // Si tu implementación de "recent" acepta query, esto ayuda.
-        // Si NO la usa, igual estás cubierto con el post-filtro (onlyFiles).
         driveQuery: FOLDER_GUARD,
         mimeTypes: [],
         dateRange: { from: null, to: null },
@@ -149,7 +197,9 @@ export class VertexClient {
     const tok = safeToken(userQuery);
     return {
       mode: "search",
-      driveQuery: addFolderGuardToQuery(`name contains '${tok}' or fullText contains '${tok}'`),
+      driveQuery: addFolderGuardToQuery(
+        `name contains '${driveEscape(tok)}' or fullText contains '${driveEscape(tok)}'`
+      ),
       mimeTypes: [],
       dateRange: { from: null, to: null },
       sort: "relevance",
@@ -165,15 +215,15 @@ export class VertexClient {
     const filtered = onlyFiles(files);
 
     const prompt = `
-    Eres un asistente de biblioteca.
-    Con base en la consulta del usuario y una lista de archivos encontrados, responde en 2–4 oraciones.
-    No inventes contenido de los documentos. Solo usa títulos y reasons.
+Eres un asistente de biblioteca.
+Con base en la consulta del usuario y una lista de archivos encontrados, responde en 2–4 oraciones.
+No inventes contenido de los documentos. Solo usa títulos y reasons.
 
-    Devuelve SOLO JSON válido:
-    {"answer":"..."}
+Devuelve SOLO JSON válido:
+{"answer":"..."}
 
-    Usuario: ${userQuery}
-    Archivos: ${JSON.stringify(filtered)}
+Usuario: ${userQuery}
+Archivos: ${JSON.stringify(filtered)}
     `.trim();
 
     const resp = await this.model.generateContent({
@@ -181,8 +231,7 @@ export class VertexClient {
     });
 
     const text =
-      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ??
-      "";
+      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ?? "";
     const json = extractJson(text);
 
     try {
@@ -205,19 +254,19 @@ export class VertexClient {
     }));
 
     const prompt = `
-    Ordena los siguientes documentos según qué tan bien responden a la intención del usuario.
-    Devuelve SOLO JSON válido (sin texto extra, sin markdown).
+Ordena los siguientes documentos según qué tan bien responden a la intención del usuario.
+Devuelve SOLO JSON válido (sin texto extra, sin markdown).
 
-    REGLAS:
-    - No inventes IDs. Usa solo IDs presentes en input.
-    - Devuelve máximo ${topK} resultados.
-    - reason debe ser una frase corta (<= 20 palabras).
+REGLAS:
+- No inventes IDs. Usa solo IDs presentes en input.
+- Devuelve máximo ${topK} resultados.
+- reason debe ser una frase corta (<= 20 palabras).
 
-    Usuario: ${userQuery}
-    Documentos: ${JSON.stringify(items)}
+Usuario: ${userQuery}
+Documentos: ${JSON.stringify(items)}
 
-    Esquema:
-    {"ranked":[{"id":"...","score":0.0,"reason":"..."}]}
+Esquema:
+{"ranked":[{"id":"...","score":0.0,"reason":"..."}]}
     `.trim();
 
     const resp = await this.model.generateContent({
@@ -225,8 +274,7 @@ export class VertexClient {
     });
 
     const text =
-      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ??
-      "";
+      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ?? "";
     const json = extractJson(text);
 
     let ranked = [];
@@ -273,16 +321,16 @@ export class VertexClient {
 
   async summarizeText({ userQuery, docTitle, docText, mimeType }) {
     const prompt = `
-    Eres un asistente que resume documentos.
-    Si NO hay texto (docText vacío), dilo claramente y sugiere abrir el archivo.
+Eres un asistente que resume documentos.
+Si NO hay texto (docText vacío), dilo claramente y sugiere abrir el archivo.
 
-    Devuelve SOLO JSON: {"answer":"..."}
+Devuelve SOLO JSON: {"answer":"..."}
 
-    Usuario: ${userQuery}
-    Documento: ${docTitle}
-    mimeType: ${mimeType}
-    Texto (puede estar vacío):
-    ${docText}
+Usuario: ${userQuery}
+Documento: ${docTitle}
+mimeType: ${mimeType}
+Texto (puede estar vacío):
+${docText}
     `.trim();
 
     const resp = await this.model.generateContent({
@@ -290,8 +338,7 @@ export class VertexClient {
     });
 
     const text =
-      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ??
-      "";
+      resp?.response?.candidates?.[0]?.content?.parts?.map((p) => p.text).join("") ?? "";
     const json = extractJson(text);
 
     try {
