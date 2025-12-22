@@ -1,4 +1,3 @@
-// src/services/users.service.js
 import { getFirebaseAdmin } from "../config/firebaseAdmin.js";
 import { Resend } from "resend";
 import { env } from "../config/env.js";
@@ -41,7 +40,8 @@ function inviteEmailTemplate({ firstName, lastName, role, email, resetLink }) {
     <p style="margin:0 0 16px 0;">Para definir tu contraseña, haz clic aquí:</p>
 
     <p style="margin:0 0 20px 0;">
-      <a href="${resetLink}" style="display:inline-block;background:#16a34a;color:#fff;padding:10px 14px;border-radius:8px;text-decoration:none;">
+      <a href="${resetLink}"
+         style="display:inline-block;background:#16a34a;color:#fff;padding:10px 14px;border-radius:8px;text-decoration:none;">
         Crear contraseña
       </a>
     </p>
@@ -52,38 +52,74 @@ function inviteEmailTemplate({ firstName, lastName, role, email, resetLink }) {
   </div>`;
 }
 
+function assertEmailConfig() {
+  if (!env.resendApiKey) {
+    const err = new Error("Missing RESEND_API_KEY");
+    err.code = "missing-email-config";
+    throw err;
+  }
+
+  if (!env.resendFrom) {
+    const err = new Error("Missing RESEND_FROM");
+    err.code = "missing-email-config";
+    throw err;
+  }
+
+  // Si estás en modo gratis sin dominio, lo normal es usar @resend.dev
+  // No es obligatorio, pero te avisa si pusiste un from que probablemente fallará.
+  if (
+    typeof env.resendFrom === "string" &&
+    env.resendFrom.length > 0 &&
+    !env.resendFrom.includes("@resend.dev")
+  ) {
+    console.warn(
+      "[mail] RESEND_FROM no es @resend.dev. Si no tienes dominio verificado, puede fallar:",
+      env.resendFrom
+    );
+  }
+}
+
 export class UsersService {
   constructor() {
     this.admin = getFirebaseAdmin();
 
-    // Config obligatoria para email
-    if (!env.resendApiKey) {
-      const err = new Error("Missing RESEND_API_KEY");
-      err.code = "missing-email-config";
-      throw err;
-    }
-    if (!env.resendFrom) {
-      const err = new Error("Missing RESEND_FROM");
-      err.code = "missing-email-config";
+    assertEmailConfig();
+
+    if (!env.resetPasswordRedirectUrl) {
+      const err = new Error("Missing RESET_PASSWORD_REDIRECT_URL");
+      err.code = "missing-config";
       throw err;
     }
 
     this.resend = new Resend(env.resendApiKey);
   }
 
+  /**
+   * Crea un usuario en Firebase Auth + Firestore y envía invitación con link de "crear contraseña".
+   * - Crea password temporal (NO se envía).
+   * - Genera Password Reset Link (Firebase) para que el usuario defina su contraseña.
+   * - Envía correo con Resend.
+   * - Rollback best-effort si algo falla.
+   */
   async createUserAndInvite({ firstName, lastName, role, email, createdByUid }) {
     const normalizedEmail = String(email).trim().toLowerCase();
+
+    const safeFirstName = String(firstName ?? "").trim();
+    const safeLastName = String(lastName ?? "").trim();
+    const safeRole = String(role ?? "").trim();
+
     let uid = null;
 
     try {
-      // 1) Crear usuario Auth con password temporal (NO se envía)
+      // 1) Crear usuario en Auth con password temporal (NO se envía)
       const tempPassword = randomPassword(24);
 
       const userRecord = await this.admin.auth().createUser({
         email: normalizedEmail,
         password: tempPassword,
-        displayName: `${String(firstName).trim()} ${String(lastName).trim()}`,
+        displayName: `${safeFirstName} ${safeLastName}`.trim(),
         emailVerified: false,
+        disabled: false,
       });
 
       uid = userRecord.uid;
@@ -91,27 +127,26 @@ export class UsersService {
       // 2) Guardar en Firestore
       await this.admin.firestore().doc(`users/${uid}`).set(
         {
-          firstName: String(firstName).trim(),
-          lastName: String(lastName).trim(),
-          role,
+          firstName: safeFirstName,
+          lastName: safeLastName,
+          role: safeRole,
           email: normalizedEmail,
-          status: "active",
+
+          // Recomendado: pending hasta que el usuario cree su contraseña
+          // (si quieres dejarlo como "active" desde el inicio, cámbialo aquí)
+          status: "pending",
+
           createdAt: this.admin.firestore.FieldValue.serverTimestamp(),
-          createdBy: createdByUid,
+          createdBy: createdByUid ?? null,
         },
         { merge: true }
       );
 
-      // 3) Custom claim role (opcional, útil si luego quieres usar claims)
-      await this.admin.auth().setCustomUserClaims(uid, { role });
+      // 3) Custom claims (opcional)
+      // Nota: los custom claims se reflejan cuando el usuario vuelve a iniciar sesión.
+      await this.admin.auth().setCustomUserClaims(uid, { role: safeRole });
 
-      // 4) Reset link
-      if (!env.resetPasswordRedirectUrl) {
-        const err = new Error("Missing RESET_PASSWORD_REDIRECT_URL");
-        err.code = "missing-config";
-        throw err;
-      }
-
+      // 4) Generar link de reset para que cree su contraseña
       const resetLink = await this.admin.auth().generatePasswordResetLink(
         normalizedEmail,
         {
@@ -120,7 +155,7 @@ export class UsersService {
         }
       );
 
-      // 5) Email (Resend) + validación de respuesta
+      // 5) Enviar correo
       console.log("[mail] sending invite to:", normalizedEmail);
       console.log("[mail] from:", env.resendFrom);
 
@@ -129,15 +164,15 @@ export class UsersService {
         to: normalizedEmail,
         subject: "Invitación: crea tu contraseña",
         html: inviteEmailTemplate({
-          firstName,
-          lastName,
-          role,
+          firstName: safeFirstName,
+          lastName: safeLastName,
+          role: safeRole,
           email: normalizedEmail,
           resetLink,
         }),
       });
 
-      // IMPORTANTE: Resend puede “no lanzar” pero devolver error
+      // Resend puede responder con { error } sin lanzar excepción
       if (resp?.error) {
         console.error("[mail] resend error:", resp.error);
         const err = new Error(resp.error.message || "Resend failed");
@@ -147,13 +182,27 @@ export class UsersService {
 
       console.log("[mail] sent ok:", resp?.data?.id ?? resp);
 
-      return { uid };
+      return {
+        uid,
+        email: normalizedEmail,
+        status: "pending",
+      };
     } catch (e) {
-      // Rollback best-effort si el correo falla (o cualquier otra falla)
+      console.error("[createUserAndInvite] failed:", e?.message ?? e);
+
+      // Error más entendible si el correo ya existe
+      if (e?.code === "auth/email-already-exists") {
+        const err = new Error("Ya existe un usuario con ese correo");
+        err.code = "email-already-exists";
+        throw err;
+      }
+
+      // Rollback best-effort si algo falló luego de crear al usuario
       if (uid) {
         await this.admin.auth().deleteUser(uid).catch(() => {});
         await this.admin.firestore().doc(`users/${uid}`).delete().catch(() => {});
       }
+
       throw e;
     }
   }
